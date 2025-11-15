@@ -167,6 +167,7 @@ router.get('/:id/status', async (req, res) => {
       status: submission.status,
       trace: submission.verification_result?.trace || null,
       tx_hash: submission.payout?.tx_hash || null,
+      payout_id: submission.payout?.id || null,
       requestId,
     });
   } catch (error) {
