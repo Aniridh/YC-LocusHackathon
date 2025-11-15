@@ -1,7 +1,7 @@
 import { JobType, JobStatus } from '@prisma/client';
 import prisma from '../db/client';
 import { verifierAgent } from '../agents/verifier';
-import { fraudGuardAgent } from '../agents/fraud-guard';
+import { fraudGuardAgent, calculateReceiptFingerprint } from '../agents/fraud-guard';
 
 const WORKER_INTERVAL_MS = 750; // 500-1000ms range
 let isRunning = false;
@@ -81,11 +81,19 @@ async function processVerificationJob(jobId: string, submissionId: string): Prom
       },
     });
 
-    // Update submission status
+    // Calculate and store receipt_fingerprint for efficient duplicate detection
+    const receiptFingerprint = calculateReceiptFingerprint(
+      verifierResult.normalizedFields.merchant,
+      verifierResult.normalizedFields.dateISO,
+      verifierResult.normalizedFields.amountCents
+    );
+
+    // Update submission status and receipt_fingerprint
     await prisma.submission.update({
       where: { id: submissionId },
       data: {
         status: decision === 'APPROVE' ? 'APPROVED' : 'REJECTED',
+        receipt_fingerprint: receiptFingerprint,
       },
     });
 

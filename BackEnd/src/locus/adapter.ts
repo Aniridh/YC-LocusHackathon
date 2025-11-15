@@ -121,36 +121,28 @@ class LocusAdapterStub implements LocusAdapter {
     // 5. Check velocity limits (optional daily counters)
     if (policy.velocity) {
       const maxApprovals = policy.velocity.max_approvals_per_device_per_day;
-      if (maxApprovals !== undefined && deviceFingerprint) {
+      if (maxApprovals !== undefined) {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
 
-        let deviceApprovals: number;
-        
-        if (deviceFingerprint) {
-          deviceApprovals = await prisma.submission.count({
-            where: {
-              quest_id: questId,
-              device_fingerprint: deviceFingerprint,
-              status: 'APPROVED',
-              created_at: {
-                gte: today,
-              },
-            },
-          });
-        } else {
-          // Fallback to wallet-based check if device_fingerprint not provided
-          deviceApprovals = await prisma.submission.count({
-            where: {
-              quest_id: questId,
-              wallet,
-              status: 'APPROVED',
-              created_at: {
-                gte: today,
-              },
-            },
-          });
+        // For per-device velocity limits, device_fingerprint is required
+        if (!deviceFingerprint) {
+          throw new PolicyViolation(
+            'Device fingerprint required for velocity limit enforcement',
+            'Device fingerprint missing'
+          );
         }
+
+        const deviceApprovals = await prisma.submission.count({
+          where: {
+            quest_id: questId,
+            device_fingerprint: deviceFingerprint,
+            status: 'APPROVED',
+            created_at: {
+              gte: today,
+            },
+          },
+        });
 
         if (deviceApprovals >= maxApprovals) {
           throw new PolicyViolation(

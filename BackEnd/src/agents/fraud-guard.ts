@@ -25,7 +25,7 @@ interface FraudGuardResult {
  * Calculate canonicalized receipt fingerprint
  * Format: sha256(lower(merchant)|'|'|dateISO|'|'|amountCents)
  */
-function calculateReceiptFingerprint(
+export function calculateReceiptFingerprint(
   merchant: string,
   dateISO: string,
   amountCents: number
@@ -144,39 +144,20 @@ export async function fraudGuardAgent(
   const receiptFingerprint = calculateReceiptFingerprint(merchant, dateISO, amountCents);
 
   // 2. Duplicate check: block same (fingerprint, wallet)
+  // Use receipt_fingerprint field directly for efficient duplicate detection
   const exactDuplicate = await prisma.submission.findFirst({
     where: {
       wallet: submission.wallet,
+      receipt_fingerprint: receiptFingerprint,
       id: { not: submissionId },
       status: { in: ['APPROVED', 'PAID'] },
     },
-    include: {
-      verification_result: true,
-    },
   });
 
-  if (exactDuplicate && exactDuplicate.verification_result?.trace) {
-    const trace = exactDuplicate.verification_result.trace as any;
-    const prevFields = trace.verifier?.normalizedFields || trace.verifier?.ocr_fields || trace.normalizedFields || trace.ocr_fields;
-    
-    if (prevFields) {
-      // Handle both new format (amountCents) and old format (amount in dollars)
-      const prevAmountCents = prevFields.amountCents 
-        ? prevFields.amountCents 
-        : (prevFields.amount ? Math.round(prevFields.amount * 100) : 0);
-      const prevDate = prevFields.dateISO || prevFields.date;
-      const prevFingerprint = calculateReceiptFingerprint(
-        prevFields.merchant,
-        prevDate,
-        prevAmountCents
-      );
-      
-      if (prevFingerprint === receiptFingerprint) {
-        flags.push('duplicate_receipt');
-        riskScore = 1.0;
-        return { riskScore, flags };
-      }
-    }
+  if (exactDuplicate) {
+    flags.push('duplicate_receipt');
+    riskScore = 1.0;
+    return { riskScore, flags };
   }
 
   // 3. Warn if same (merchant, dateISO) within 7 days

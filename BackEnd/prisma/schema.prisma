@@ -114,6 +114,7 @@ model Submission {
   justification_text  String
   receipt_url         String
   content_hash        String
+  receipt_fingerprint String?          // SHA256 of normalized merchant|dateISO|amountCents
   device_fingerprint  String
   status              SubmissionStatus @default(PENDING)
   created_at          DateTime         @default(now())
@@ -126,10 +127,12 @@ model Submission {
   @@index([quest_id])
   @@index([wallet])
   @@index([content_hash])
+  @@index([receipt_fingerprint])
   @@index([device_fingerprint])
   @@index([status])
   @@index([created_at])
   @@index([wallet, quest_id])
+  @@index([wallet, receipt_fingerprint])
 }
 
 model VerificationResult {
