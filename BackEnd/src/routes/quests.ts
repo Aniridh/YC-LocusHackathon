@@ -4,11 +4,72 @@ import { createApiError, ErrorCode, generateRequestId } from '../utils/errors';
 
 const router = express.Router();
 
+// API key auth for POST /api/quests
+const BUYER_API_KEY = process.env.BUYER_API_KEY || 'demo_buyer_key';
+
+function checkBuyerAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const apiKey = req.get('X-API-Key') || req.get('Authorization')?.replace('Bearer ', '');
+  
+  if (apiKey !== BUYER_API_KEY) {
+    return res.status(401).json({
+      error: 'Unauthorized',
+      requestId: generateRequestId(),
+    });
+  }
+  
+  next();
+}
+
+/**
+ * GET /api/quests
+ * Get public list of active quests
+ */
+router.get('/', async (req, res) => {
+  const requestId = generateRequestId();
+
+  try {
+    const quests = await prisma.quest.findMany({
+      where: {
+        status: 'ACTIVE',
+      },
+      include: {
+        quest_rules: {
+          select: {
+            rules: true,
+          },
+        },
+      },
+      orderBy: {
+        created_at: 'desc',
+      },
+    });
+
+    res.json({
+      quests: quests.map(q => ({
+        id: q.id,
+        name: q.name,
+        currency: q.currency,
+        unit_amount: parseFloat(q.unit_amount.toString()),
+        budget_total: parseFloat(q.budget_total.toString()),
+        budget_remaining: parseFloat(q.budget_remaining.toString()),
+        eligibility: q.quest_rules[0]?.rules?.eligibility || [],
+        created_at: q.created_at,
+      })),
+      requestId,
+    });
+  } catch (error) {
+    console.error('Quest list error:', error);
+    res.status(500).json(
+      createApiError(ErrorCode.INTERNAL_ERROR, requestId)
+    );
+  }
+});
+
 /**
  * POST /api/quests
- * Create a new quest
+ * Create a new quest (API key auth required)
  */
-router.post('/', async (req, res) => {
+router.post('/', checkBuyerAuth, async (req, res) => {
   const requestId = generateRequestId();
 
   try {

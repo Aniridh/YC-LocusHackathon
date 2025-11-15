@@ -8,11 +8,11 @@ const router = express.Router();
  * GET /api/audits/:payout_id
  * Get full audit record for a payout
  */
-router.get('/audits/:payout_id', async (req, res) => {
+router.get('/:payout_id', async (req, res) => {
   const requestId = generateRequestId();
 
   try {
-    const { payout_id } = req.params;
+    const payout_id = req.params.payout_id;
 
     const payout = await prisma.payout.findUnique({
       where: { id: payout_id },

@@ -66,7 +66,7 @@ router.post('/payouts/:id/retry', async (req, res) => {
     }
 
     // Retry payout
-    await payoutAgent(payout.submission as any);
+    await payoutAgent({ submissionId: payout.submission_id });
 
     res.json({
       message: 'Payout retried successfully',

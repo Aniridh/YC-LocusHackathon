@@ -1,33 +1,29 @@
 import { Submission, PayoutStatus } from '@prisma/client';
 import prisma from '../db/client';
-import { getLocusAdapter } from '../locus/adapter';
+import { getLocusAdapter, PolicyViolation } from '../locus/adapter';
 import { createHash } from 'crypto';
 import { ethers } from 'ethers';
 
+interface PayoutInput {
+  submissionId: string;
+}
 
-interface SubmissionWithDetails extends Submission {
-  quest: {
-    id: string;
-    quest_rules: Array<{ rules: any }>;
-    budget_remaining: any;
-    unit_amount: any;
-  };
-  verification_result: {
-    decision: string;
-    trace: any;
-    risk_score: number;
-    reasons: string[];
-  } | null;
+interface PayoutResult {
+  payoutId: string;
+  txHash: string;
+  amount: number;
+  mocked: boolean;
 }
 
 /**
  * Generate deterministic transaction hash for DEMO_MODE
- * Format: keccak256(submission_id + timestamp)
+ * Format: keccak256(submissionId|timestamp)
  */
 function generateDemoTxHash(submissionId: string): string {
   const timestamp = Date.now().toString();
-  const input = `${submissionId}_${timestamp}`;
-  return createHash('sha256').update(input).digest('hex');
+  const input = `${submissionId}|${timestamp}`;
+  // Use keccak256 (Ethereum hash function) via ethers
+  return ethers.keccak256(ethers.toUtf8Bytes(input));
 }
 
 /**
@@ -53,183 +49,250 @@ async function executeRealPayout(
 
   const usdcContract = new ethers.Contract(usdcAddress, usdcAbi, signer);
 
-  // Estimate gas
-  const gasEstimate = await usdcContract.transfer.estimateGas(wallet, amountWei);
+  // Execute transfer
+  const tx = await usdcContract.transfer(wallet, amountWei);
+  await tx.wait();
 
-  // Send transaction
-  const tx = await usdcContract.transfer(wallet, amountWei, {
-    gasLimit: gasEstimate,
-  });
-
-  // Wait for 1 block confirmation
-  const receipt = await tx.wait(1);
-
-  return receipt.hash;
+  return tx.hash;
 }
 
-export async function payoutAgent(
-  submission: SubmissionWithDetails
-): Promise<void> {
-  if (!submission.verification_result) {
-    throw new Error('Verification result not found');
-  }
+/**
+ * Retry helper for transient errors
+ */
+async function retry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  delayMs: number = 1000
+): Promise<T> {
+  let lastError: Error | null = null;
 
-  if (submission.verification_result.decision !== 'APPROVE') {
-    throw new Error('Submission not approved');
-  }
-
-  const quest = submission.quest;
-  const rules = quest.quest_rules[0]?.rules;
-  const payoutAmount = parseFloat(quest.unit_amount.toString());
-  const demoMode = process.env.DEMO_MODE === 'true';
-
-  // Get Locus adapter
-  const locus = getLocusAdapter();
-
-  // Authorize spend (atomic check with Locus)
-  // Pass device_fingerprint for proper velocity checking
-  const authorizeResult = await locus.authorizeSpend({
-    policy: rules?.locus_policy || {},
-    amount: payoutAmount,
-    wallet: submission.wallet,
-    questId: quest.id,
-    deviceFingerprint: submission.device_fingerprint,
-  });
-
-  if (!authorizeResult.authorized) {
-    throw new Error(`Policy violation: ${authorizeResult.reason}`);
-  }
-
-  // Execute payout in transaction
-  await prisma.$transaction(async (tx) => {
-    // Lock quest and check budget again (double-check)
-    const questData = await tx.quest.findUnique({
-      where: { id: quest.id },
-    });
-
-    if (!questData) {
-      throw new Error('Quest not found');
-    }
-
-    const budgetRemaining = parseFloat(questData.budget_remaining.toString());
-    if (budgetRemaining < payoutAmount) {
-      throw new Error('Budget exhausted');
-    }
-
-    // Generate or execute transaction
-    let txHash: string;
-    let mocked = false;
-
-    if (demoMode) {
-      // DEMO_MODE: Generate deterministic hash
-      txHash = `0x${generateDemoTxHash(submission.id)}`;
-      mocked = true;
-    } else {
-      // Real mode: Execute USDC transfer
-      const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL;
-      const usdcAddress = process.env.USDC_TEST_TOKEN_ADDRESS;
-      const privateKey = process.env.PAYOUT_WALLET_PRIVATE_KEY;
-
-      if (!rpcUrl || !usdcAddress || !privateKey) {
-        throw new Error('Blockchain configuration missing');
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+      
+      // Don't retry on policy violations or non-transient errors
+      if (error instanceof PolicyViolation) {
+        throw error;
       }
 
-      try {
-        txHash = await executeRealPayout(
-          submission.wallet,
-          payoutAmount,
-          usdcAddress,
-          rpcUrl,
-          privateKey
+      // Check if error is transient (network, timeout, etc.)
+      const isTransient = 
+        error instanceof Error && (
+          error.message.includes('timeout') ||
+          error.message.includes('network') ||
+          error.message.includes('ECONNRESET') ||
+          error.message.includes('ETIMEDOUT')
         );
-      } catch (error) {
-        // Mark as failed but don't throw (allow retry)
-        await tx.payout.create({
-          data: {
-            submission_id: submission.id,
-            quest_id: quest.id,
-            amount: payoutAmount,
-            currency: 'USDC',
-            status: 'FAILED',
-            mocked: false,
-          },
-        });
 
-        // Recredit budget
-        await tx.quest.update({
-          where: { id: quest.id },
-          data: {
-            budget_remaining: {
-              increment: payoutAmount,
-            },
-          },
-        });
+      if (!isTransient && attempt < maxRetries - 1) {
+        // Not transient, but we'll retry anyway for safety
+      }
 
-        throw new Error(`Payout failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (attempt < maxRetries - 1) {
+        // Exponential backoff
+        const backoffDelay = delayMs * Math.pow(2, attempt);
+        await new Promise(resolve => setTimeout(resolve, backoffDelay));
       }
     }
+  }
 
-    // Update quest budget
-    await tx.quest.update({
-      where: { id: quest.id },
-      data: {
-        budget_remaining: {
-          decrement: payoutAmount,
+  throw lastError || new Error('Retry failed');
+}
+
+export async function payoutAgent(input: PayoutInput): Promise<PayoutResult> {
+  const { submissionId } = input;
+
+  return await retry(async () => {
+    // Load submission with all required relations
+    const submission = await prisma.submission.findUnique({
+      where: { id: submissionId },
+      include: {
+        quest: {
+          include: {
+            quest_rules: true,
+          },
         },
+        verification_result: true,
+        payout: true,
       },
     });
 
-    // Create payout record
-    const payout = await tx.payout.create({
-      data: {
-        submission_id: submission.id,
-        quest_id: quest.id,
+    if (!submission) {
+      throw new Error(`Submission ${submissionId} not found`);
+    }
+
+    if (!submission.verification_result) {
+      throw new Error(`Submission ${submissionId} has no verification result`);
+    }
+
+    if (submission.status !== 'APPROVED') {
+      throw new Error(`Submission ${submissionId} is not approved (status: ${submission.status})`);
+    }
+
+    // Check if payout already exists
+    if (submission.payout) {
+      if (submission.payout.status === 'COMPLETED') {
+        return {
+          payoutId: submission.payout.id,
+          txHash: submission.payout.tx_hash || '',
+          amount: Number(submission.payout.amount),
+          mocked: submission.payout.mocked,
+        };
+      }
+      // If payout exists but not completed, continue to retry
+    }
+
+    const quest = submission.quest;
+    const rules = quest.quest_rules[0]?.rules;
+    const payoutAmount = Number(quest.unit_amount);
+
+    // Get Locus adapter
+    const locus = getLocusAdapter();
+
+    // Execute in transaction with row locking
+    const result = await prisma.$transaction(async (tx) => {
+      // Lock quest row (SELECT ... FOR UPDATE)
+      const questData = await tx.$queryRaw<Array<{
+        id: string;
+        budget_remaining: any;
+        unit_amount: any;
+      }>>`
+        SELECT id, budget_remaining, unit_amount
+        FROM "Quest"
+        WHERE id = ${quest.id}
+        FOR UPDATE
+      `;
+
+      if (questData.length === 0) {
+        throw new Error('Quest not found');
+      }
+
+      const lockedQuest = questData[0];
+      const budgetRemaining = Number(lockedQuest.budget_remaining);
+      const unitAmount = Number(lockedQuest.unit_amount);
+
+      // Re-check budget
+      if (budgetRemaining < unitAmount) {
+        throw new PolicyViolation(
+          `Insufficient budget: ${budgetRemaining} < ${unitAmount}`,
+          'Quest budget exhausted'
+        );
+      }
+
+      // Call Locus adapter
+      const authorizeResult = await locus.authorizeSpend({
+        policy: rules?.locus_policy || {},
         amount: payoutAmount,
-        currency: 'USDC',
-        tx_hash: txHash,
-        status: 'COMPLETED',
-        mocked,
-      },
-    });
+        wallet: submission.wallet,
+        questId: quest.id,
+        deviceFingerprint: submission.device_fingerprint,
+      });
 
-    // Update submission status
-    await tx.submission.update({
-      where: { id: submission.id },
-      data: { status: 'PAID' },
-    });
+      if (!authorizeResult.authorized) {
+        throw new PolicyViolation(
+          authorizeResult.reason || 'Policy violation',
+          authorizeResult.reason
+        );
+      }
 
-    // Create audit event
-    const justificationHash = createHash('sha256')
-      .update(submission.justification_text)
-      .digest('hex');
+      // Decrement budget
+      await tx.quest.update({
+        where: { id: quest.id },
+        data: {
+          budget_remaining: {
+            decrement: unitAmount,
+          },
+        },
+      });
 
-    await locus.recordAudit({
-      entityType: 'payout',
-      entityId: payout.id,
-      actorId: 'agent:payout',
-      eventType: 'payout_completed',
-      payload: {
-        submission_id: submission.id,
-        quest_id: quest.id,
-        amount: payoutAmount,
-        tx_hash: txHash,
-        mocked,
-        decision_trace: submission.verification_result.trace,
-        justification_hash: justificationHash,
-        agent_ids: ['agent:verifier', 'agent:fraud_guard', 'agent:payout'],
-        timestamp: new Date().toISOString(),
-      },
-    });
+      // Create or update payout row
+      const payout = await tx.payout.upsert({
+        where: { submission_id: submissionId },
+        update: {
+          status: 'PROCESSING',
+        },
+        create: {
+          submission_id: submissionId,
+          quest_id: quest.id,
+          amount: payoutAmount,
+          currency: 'USDC',
+          status: 'PROCESSING',
+          mocked: false,
+        },
+      });
 
-    // Also store in database
-    await tx.auditEvent.create({
-      data: {
-        entity_type: 'payout',
-        entity_id: payout.id,
-        actor_id: 'agent:payout',
-        event_type: 'payout_completed',
+      // Generate tx hash
+      const demoMode = process.env.DEMO_MODE === 'true';
+      let txHash: string;
+      let mocked = false;
+
+      if (demoMode) {
+        // DEMO_MODE: keccak256(submissionId|timestamp)
+        txHash = generateDemoTxHash(submissionId);
+        mocked = true;
+      } else {
+        // Real ERC20 transfer on Base Sepolia
+        const usdcAddress = process.env.USDC_ADDRESS;
+        const rpcUrl = process.env.RPC_URL;
+        const hotWalletPk = process.env.HOT_WALLET_PK;
+
+        if (!usdcAddress || !rpcUrl || !hotWalletPk) {
+          throw new Error('Missing required environment variables for real payout: USDC_ADDRESS, RPC_URL, HOT_WALLET_PK');
+        }
+
+        try {
+          txHash = await executeRealPayout(
+            submission.wallet,
+            payoutAmount,
+            usdcAddress,
+            rpcUrl,
+            hotWalletPk
+          );
+        } catch (error) {
+          // Update payout status to FAILED
+          await tx.payout.update({
+            where: { id: payout.id },
+            data: {
+              status: 'FAILED',
+              last_error: error instanceof Error ? error.message : 'Unknown error',
+            },
+          });
+          throw error;
+        }
+      }
+
+      // Update payout with tx hash
+      await tx.payout.update({
+        where: { id: payout.id },
+        data: {
+          tx_hash: txHash,
+          status: 'COMPLETED',
+          mocked,
+        },
+      });
+
+      // Update submission status to PAID
+      await tx.submission.update({
+        where: { id: submissionId },
+        data: {
+          status: 'PAID',
+        },
+      });
+
+      // Append audit event with full trace
+      const justificationHash = createHash('sha256')
+        .update(submission.justification_text)
+        .digest('hex');
+
+      await locus.recordAudit({
+        entityType: 'payout',
+        entityId: payout.id,
+        actorId: 'agent:payout',
+        eventType: 'payout_completed',
         payload: {
-          submission_id: submission.id,
+          submission_id: submissionId,
           quest_id: quest.id,
           amount: payoutAmount,
           tx_hash: txHash,
@@ -239,8 +302,16 @@ export async function payoutAgent(
           agent_ids: ['agent:verifier', 'agent:fraud_guard', 'agent:payout'],
           timestamp: new Date().toISOString(),
         },
-      },
-    });
+      });
+
+      return {
+        payoutId: payout.id,
+        txHash,
+        amount: payoutAmount,
+        mocked,
+      };
+    }, 3, 1000); // 3 retries, 1s initial delay
+
+    return result;
   });
 }
-

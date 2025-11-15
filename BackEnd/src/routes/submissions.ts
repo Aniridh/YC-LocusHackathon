@@ -140,7 +140,7 @@ router.post('/', upload.single('receipt_image'), async (req, res) => {
 
 /**
  * GET /api/submissions/:id/status
- * Get submission status (for polling)
+ * Get submission status, trace, and tx hash
  */
 router.get('/:id/status', async (req, res) => {
   const requestId = generateRequestId();
@@ -162,27 +162,15 @@ router.get('/:id/status', async (req, res) => {
       );
     }
 
-    const response: any = {
+    res.json({
       submission_id: submission.id,
       status: submission.status,
+      trace: submission.verification_result?.trace || null,
+      tx_hash: submission.payout?.tx_hash || null,
       requestId,
-    };
-
-    if (submission.verification_result) {
-      response.decision_trace = submission.verification_result.trace;
-      if (submission.status === 'REJECTED') {
-        response.error_message = submission.verification_result.reasons.join('; ');
-      }
-    }
-
-    if (submission.payout) {
-      response.tx_hash = submission.payout.tx_hash;
-      response.payout_status = submission.payout.status;
-    }
-
-    res.json(response);
+    });
   } catch (error) {
-    console.error('Status check error:', error);
+    console.error('Status fetch error:', error);
     res.status(500).json(
       createApiError(ErrorCode.INTERNAL_ERROR, requestId)
     );

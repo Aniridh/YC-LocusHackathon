@@ -1,20 +1,38 @@
 import prisma from '../db/client';
 
-
-export type AuthorizeResult = {
+export interface AuthorizeResult {
   authorized: boolean;
   reason?: string;
-};
+  remainingBudget?: number;
+}
 
-export interface LocusLike {
-  authorizeSpend(p: {
+export class AdapterUnavailable extends Error {
+  constructor(message: string = 'Locus adapter is unavailable') {
+    super(message);
+    this.name = 'AdapterUnavailable';
+  }
+}
+
+export class PolicyViolation extends Error {
+  constructor(
+    public reason: string,
+    message?: string
+  ) {
+    super(message || reason);
+    this.name = 'PolicyViolation';
+  }
+}
+
+export interface LocusAdapter {
+  authorizeSpend(params: {
     policy: any;
     amount: number;
     wallet: string;
     questId: string;
-    deviceFingerprint?: string; // Optional device fingerprint for velocity checks
+    deviceFingerprint?: string;
   }): Promise<AuthorizeResult>;
-  recordAudit(e: {
+  
+  recordAudit(event: {
     entityType: string;
     entityId: string;
     actorId: string;
@@ -23,195 +41,193 @@ export interface LocusLike {
   }): Promise<void>;
 }
 
-export class LocusAdapterUnavailable extends Error {
-  constructor(message: string = 'Locus adapter unavailable') {
-    super(message);
-    this.name = 'LocusAdapterUnavailable';
-  }
+interface AuthorizeSpendParams {
+  policy: any;
+  amount: number;
+  wallet: string;
+  questId: string;
+  deviceFingerprint?: string;
 }
 
-export class PolicyViolation extends Error {
-  constructor(public reason: string) {
-    super(`Policy violation: ${reason}`);
-    this.name = 'PolicyViolation';
-  }
-}
+class LocusAdapterStub implements LocusAdapter {
+  async authorizeSpend(params: AuthorizeSpendParams): Promise<AuthorizeResult> {
+    const { policy, amount, wallet, questId, deviceFingerprint } = params;
 
-/**
- * Locus Adapter Stub
- * 
- * This stub implementation enforces policy rules in the database.
- * 
- * Assumptions:
- * - Locus API expects { policy, amount, wallet, questId } and returns { authorized: boolean, reason?: string }
- * - If real API differs, update this interface and the stub implementation
- * 
- * To swap to real Locus SDK:
- * 1. Replace LocusAdapterStub class with real SDK client
- * 2. Update authorizeSpend to call real API
- * 3. Update recordAudit to call real API
- * 4. No other code changes needed (all callers use LocusLike interface)
- */
-export class LocusAdapterStub implements LocusLike {
-  async authorizeSpend(p: {
-    policy: any;
-    amount: number;
-    wallet: string;
-    questId: string;
-    deviceFingerprint?: string;
-  }): Promise<AuthorizeResult> {
-    const { policy, amount, wallet, questId, deviceFingerprint } = p;
-
-    // Load quest with lock (atomic check)
-    // Use Prisma's parameterized query
-    const quest = await prisma.$queryRaw<Array<{
-      id: string;
-      budget_remaining: any;
-      unit_amount: any;
-    }>>`
-      SELECT id, budget_remaining, unit_amount
-      FROM "Quest"
-      WHERE id = ${questId}
-      FOR UPDATE
-    `;
-
-    if (quest.length === 0) {
-      return {
-        authorized: false,
-        reason: 'Quest not found',
-      };
-    }
-
-    const questData = quest[0];
-    const budgetRemaining = parseFloat(questData.budget_remaining.toString());
-    const unitAmount = parseFloat(questData.unit_amount.toString());
-
-    // Check max_per_payout
-    if (policy.max_per_payout && amount > policy.max_per_payout) {
-      return {
-        authorized: false,
-        reason: `Amount ${amount} exceeds max_per_payout ${policy.max_per_payout}`,
-      };
-    }
-
-    // Check budget_remaining
-    if (budgetRemaining < unitAmount) {
-      return {
-        authorized: false,
-        reason: `Budget exhausted. Remaining: ${budgetRemaining}, Required: ${unitAmount}`,
-      };
-    }
-
-    // Check daily spend
-    const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
-    const todayPayouts = await prisma.payout.aggregate({
-      where: {
-        quest_id: questId,
-        created_at: {
-          gte: new Date(new Date().setHours(0, 0, 0, 0)),
-        },
-        status: 'COMPLETED',
-      },
-      _sum: {
-        amount: true,
-      },
+    // Load quest to check budget
+    const quest = await prisma.quest.findUnique({
+      where: { id: questId },
     });
 
-    const dailySpend = parseFloat(todayPayouts._sum.amount?.toString() || '0');
-    if (policy.max_per_day && dailySpend + amount > policy.max_per_day) {
-      return {
-        authorized: false,
-        reason: `Daily limit exceeded. Current: ${dailySpend}, Attempted: ${amount}, Max: ${policy.max_per_day}`,
-      };
+    if (!quest) {
+      throw new PolicyViolation('Quest not found', 'Invalid quest ID');
     }
 
-    // Check vendor allow-list (if provided in policy)
-    // This is checked in the verifier, but we can double-check here
-
-    // Check velocity limits (if provided)
-    if (policy.velocity) {
-      // Use device_fingerprint if provided, otherwise fall back to wallet
-      // Prisma doesn't support dynamic field names, so we need separate queries
-      let deviceApprovals: number;
-      
-      if (deviceFingerprint) {
-        deviceApprovals = await prisma.submission.count({
-          where: {
-            quest_id: questId,
-            device_fingerprint: deviceFingerprint,
-            status: 'APPROVED',
-            created_at: {
-              gte: new Date(new Date().setHours(0, 0, 0, 0)),
-            },
-          },
-        });
-      } else {
-        // Fallback to wallet-based check if device_fingerprint not provided
-        deviceApprovals = await prisma.submission.count({
-          where: {
-            quest_id: questId,
-            wallet,
-            status: 'APPROVED',
-            created_at: {
-              gte: new Date(new Date().setHours(0, 0, 0, 0)),
-            },
-          },
-        });
+    // 1. Check budget remaining
+    if (policy.max_per_payout !== undefined) {
+      if (amount > policy.max_per_payout) {
+        throw new PolicyViolation(
+          `Amount $${amount} exceeds max per payout of $${policy.max_per_payout}`,
+          'Payout amount exceeds policy limit'
+        );
       }
+    }
 
-      if (policy.velocity.max_approvals_per_device_per_day) {
-        const maxApprovals = policy.velocity.max_approvals_per_device_per_day;
+    // Check quest budget remaining
+    const budgetRemaining = Number(quest.budget_remaining);
+    if (amount > budgetRemaining) {
+      throw new PolicyViolation(
+        `Amount $${amount} exceeds remaining budget of $${budgetRemaining}`,
+        'Insufficient quest budget'
+      );
+    }
+
+    // 2. Check daily spend sum
+    if (policy.max_per_day !== undefined) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const dailySpend = await prisma.payout.aggregate({
+        where: {
+          quest_id: questId,
+          status: 'COMPLETED',
+          created_at: { gte: today },
+        },
+        _sum: {
+          amount: true,
+        },
+      });
+
+      const totalDailySpend = Number(dailySpend._sum.amount || 0);
+      if (totalDailySpend + amount > policy.max_per_day) {
+        throw new PolicyViolation(
+          `Daily spend limit would be exceeded: $${totalDailySpend + amount} > $${policy.max_per_day}`,
+          'Daily spend limit exceeded'
+        );
+      }
+    }
+
+    // 3. Check vendor allow-list (if provided in policy)
+    if (policy.vendor_allow_list && Array.isArray(policy.vendor_allow_list)) {
+      // This check is done at verification time, not here
+      // But we can validate the policy structure
+    }
+
+    // 4. Check justification required
+    if (policy.require_justification) {
+      // This check is done at submission time, not here
+      // But we can validate the policy structure
+    }
+
+    // 5. Check velocity limits (optional daily counters)
+    if (policy.velocity) {
+      const maxApprovals = policy.velocity.max_approvals_per_device_per_day;
+      if (maxApprovals !== undefined && deviceFingerprint) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        let deviceApprovals: number;
+        
+        if (deviceFingerprint) {
+          deviceApprovals = await prisma.submission.count({
+            where: {
+              quest_id: questId,
+              device_fingerprint: deviceFingerprint,
+              status: 'APPROVED',
+              created_at: {
+                gte: today,
+              },
+            },
+          });
+        } else {
+          // Fallback to wallet-based check if device_fingerprint not provided
+          deviceApprovals = await prisma.submission.count({
+            where: {
+              quest_id: questId,
+              wallet,
+              status: 'APPROVED',
+              created_at: {
+                gte: today,
+              },
+            },
+          });
+        }
+
         if (deviceApprovals >= maxApprovals) {
-          return {
-            authorized: false,
-            reason: `Velocity limit exceeded. Approvals today: ${deviceApprovals}, Max: ${maxApprovals}`,
-          };
+          throw new PolicyViolation(
+            `Device velocity limit exceeded: ${deviceApprovals} approvals today (max: ${maxApprovals})`,
+            'Velocity limit exceeded'
+          );
+        }
+      }
+    }
+
+    // Optional: Use daily counters for atomic limit enforcement
+    if (policy.enable_daily_counters) {
+      const today = new Date();
+      const yyyymmdd = today.toISOString().split('T')[0].replace(/-/g, '');
+
+      // Use raw SQL for atomic upsert with composite key
+      // Prisma doesn't support upsert with composite unique constraints directly
+      await prisma.$executeRaw`
+        INSERT INTO "DailyCounter" (wallet, quest_id, yyyymmdd, count)
+        VALUES (${wallet}, ${questId}, ${yyyymmdd}, 1)
+        ON CONFLICT (wallet, quest_id, yyyymmdd)
+        DO UPDATE SET count = "DailyCounter".count + 1
+      `;
+
+      // Fetch the counter to check limits
+      const counter = await prisma.$queryRaw<Array<{ count: number }>>`
+        SELECT count FROM "DailyCounter"
+        WHERE wallet = ${wallet} AND quest_id = ${questId} AND yyyymmdd = ${yyyymmdd}
+      `;
+      
+      const currentCount = counter[0]?.count || 0;
+
+      if (policy.max_approvals_per_wallet_per_day) {
+        if (currentCount > policy.max_approvals_per_wallet_per_day) {
+          throw new PolicyViolation(
+            `Wallet daily limit exceeded: ${currentCount} approvals today (max: ${policy.max_approvals_per_wallet_per_day})`,
+            'Daily wallet limit exceeded'
+          );
         }
       }
     }
 
     return {
       authorized: true,
+      remainingBudget: budgetRemaining - amount,
     };
   }
 
-  async recordAudit(e: {
+  async recordAudit(event: {
     entityType: string;
     entityId: string;
     actorId: string;
     eventType: string;
     payload: any;
   }): Promise<void> {
-    // Store audit event in database
-    await prisma.auditEvent.create({
-      data: {
-        entity_type: e.entityType,
-        entity_id: e.entityId,
-        actor_id: e.actorId,
-        event_type: e.eventType,
-        payload: e.payload,
-      },
-    });
-  }
-}
-
-// Dependency injection: Get Locus adapter instance
-let locusAdapterInstance: LocusLike | null = null;
-
-export function getLocusAdapter(): LocusLike {
-  if (!locusAdapterInstance) {
-    // For now, use stub. In production, check env var for real SDK
-    const useRealLocus = process.env.USE_REAL_LOCUS === 'true';
-    
-    if (useRealLocus) {
-      // TODO: Initialize real Locus SDK here
-      // locusAdapterInstance = new LocusSDK({ apiKey: process.env.LOCUS_API_KEY });
-      throw new Error('Real Locus SDK not yet implemented. Set USE_REAL_LOCUS=false or implement SDK integration.');
-    } else {
-      locusAdapterInstance = new LocusAdapterStub();
+    try {
+      await prisma.auditEvent.create({
+        data: {
+          entity_type: event.entityType,
+          entity_id: event.entityId,
+          actor_id: event.actorId,
+          event_type: event.eventType,
+          payload: event.payload,
+        },
+      });
+    } catch (error) {
+      // Log but don't throw - audit failures shouldn't block operations
+      console.error('Failed to record audit event:', error);
     }
   }
-  
-  return locusAdapterInstance;
 }
 
+let adapterInstance: LocusAdapter | null = null;
+
+export function getLocusAdapter(): LocusAdapter {
+  if (!adapterInstance) {
+    adapterInstance = new LocusAdapterStub();
+  }
+  return adapterInstance;
+}

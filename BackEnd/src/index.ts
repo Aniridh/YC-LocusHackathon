@@ -26,17 +26,43 @@ app.use(pinoHttp({ logger }));
 app.use('/api/quests', questRoutes);
 app.use('/api/submissions', submissionRoutes);
 app.use('/api/payouts', payoutRoutes);
+app.use('/api/audits', payoutRoutes); // Also mount audits routes
 app.use('/api/admin', adminRoutes);
 app.use('/api/queue', queueRoutes);
 app.use('/healthz', healthzRoutes);
 
-// Error handling middleware
+// Error handling middleware - map errors to friendly messages
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  logger.error({ err, req: { id: req.id } }, 'Request error');
+  const requestId = req.id || Math.random().toString(36).substring(2, 15);
   
-  res.status(err.status || 500).json({
-    error: err.message || 'Internal server error',
-    requestId: req.id,
+  logger.error({ err, req: { id: requestId } }, 'Request error');
+  
+  // Map known error types to friendly messages
+  let statusCode = err.status || 500;
+  let message = err.message || 'An internal error occurred. Please try again.';
+  
+  // Handle PolicyViolation
+  if (err.name === 'PolicyViolation') {
+    statusCode = 400;
+    message = err.reason || message;
+  }
+  
+  // Handle VerifierError
+  if (err.name === 'VerifierError') {
+    statusCode = 400;
+    message = err.message;
+  }
+  
+  // Handle validation errors
+  if (err.name === 'ValidationError' || err.name === 'MulterError') {
+    statusCode = 400;
+    message = err.message || 'Invalid input provided.';
+  }
+  
+  res.status(statusCode).json({
+    error: message,
+    requestId,
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
   });
 });
 
