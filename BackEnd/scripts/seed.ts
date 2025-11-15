@@ -1,14 +1,12 @@
-import { PrismaClient } from '@prisma/client';
+import prisma from '../src/db/client';
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const prisma = new PrismaClient();
-
 async function main() {
   console.log('🌱 Seeding database...');
 
-  // 1. Upsert buyer (deterministic ID)
+  // 1. Upsert buyer_demo
   const buyer = await prisma.buyer.upsert({
     where: { id: 'buyer_demo' },
     update: {},
@@ -21,7 +19,7 @@ async function main() {
   });
   console.log('✅ Buyer created:', buyer.id);
 
-  // 2. Upsert quest (deterministic ID)
+  // 2. Upsert q_demo_petco with Petco/Chewy rules JSON
   const questRules = {
     quest_id: 'q_demo_petco',
     eligibility: [
@@ -69,9 +67,20 @@ async function main() {
       quest_rules: true,
     },
   });
+
+  // Upsert quest rules separately (idempotent)
+  await prisma.questRule.upsert({
+    where: { quest_id: quest.id },
+    update: { rules: questRules },
+    create: {
+      quest_id: quest.id,
+      rules: questRules,
+    },
+  });
+  
   console.log('✅ Quest created:', quest.id);
 
-  // 3. Upsert test contributor wallets
+  // 3. Upsert 10 contributor wallets
   const testWallets = [
     '0x1234567890123456789012345678901234567890',
     '0x2345678901234567890123456789012345678901',
@@ -102,30 +111,51 @@ async function main() {
   }
   console.log(`✅ Created ${contributors.length} contributors`);
 
-  // 4. Load pre-baked OCR fixtures
+  // 4. Ensure fixtures/receipts.json exists with 6 fixture receipts
   const fixturesPath = path.join(__dirname, '../fixtures/receipts.json');
-  let fixtures: Record<string, any> = {};
+  const fixturesDir = path.dirname(fixturesPath);
+  
+  if (!fs.existsSync(fixturesDir)) {
+    fs.mkdirSync(fixturesDir, { recursive: true });
+  }
+
+  let fixtures: Record<string, { merchant: string; date: string; amount: number }> = {};
   
   if (fs.existsSync(fixturesPath)) {
     const fixturesData = fs.readFileSync(fixturesPath, 'utf-8');
     fixtures = JSON.parse(fixturesData);
     console.log(`✅ Loaded ${Object.keys(fixtures).length} OCR fixtures`);
   } else {
-    console.log('⚠️  No fixtures file found. Run npm run preprocess-receipts first.');
+    // Create default fixtures if file doesn't exist
+    fixtures = {
+      'demo_hash_1': { merchant: 'Chewy', date: '2025-01-15', amount: 28.33 },
+      'demo_hash_2': { merchant: 'Petco', date: '2025-01-20', amount: 35.50 },
+      'demo_hash_3': { merchant: 'Chewy', date: '2025-01-10', amount: 42.99 },
+      'demo_hash_4': { merchant: 'Petco', date: '2025-01-18', amount: 19.99 },
+      'demo_hash_5': { merchant: 'Chewy', date: '2025-01-12', amount: 31.25 },
+      'demo_hash_6': { merchant: 'Petco', date: '2025-01-22', amount: 27.80 },
+    };
+    fs.writeFileSync(fixturesPath, JSON.stringify(fixtures, null, 2));
+    console.log('✅ Created default fixtures file');
   }
 
-  // 5. Create 2 pre-approved submissions for demo (if fixtures available)
-  if (Object.keys(fixtures).length > 0) {
+  // 5. Create 2 pre-approved submissions
+  if (Object.keys(fixtures).length >= 2) {
     const fixtureKeys = Object.keys(fixtures).slice(0, 2);
     
-    for (let i = 0; i < Math.min(2, fixtureKeys.length); i++) {
+    for (let i = 0; i < 2; i++) {
       const imageHash = fixtureKeys[i];
       const fixture = fixtures[imageHash];
       const contributor = contributors[i % contributors.length];
       
-      // Create submission
-      const submission = await prisma.submission.create({
-        data: {
+      // Upsert submission (idempotent)
+      const submission = await prisma.submission.upsert({
+        where: { id: `demo_submission_${i}` },
+        update: {
+          status: 'APPROVED',
+        },
+        create: {
+          id: `demo_submission_${i}`,
           quest_id: quest.id,
           contributor_id: contributor.id,
           wallet: contributor.wallet,
@@ -138,18 +168,30 @@ async function main() {
         },
       });
 
-      // Create verification result
-      await prisma.verificationResult.create({
-        data: {
+      // Upsert verification result
+      await prisma.verificationResult.upsert({
+        where: { submission_id: submission.id },
+        update: {},
+        create: {
           submission_id: submission.id,
           decision: 'APPROVE',
           trace: {
-            rules_fired: [
-              { field: 'merchant', ok: true, observed: fixture.merchant },
-              { field: 'receipt_age_days', ok: true, observed: 9 },
-              { field: 'amount', ok: true, observed: fixture.amount },
-              { field: 'zip_prefix', ok: true, observed: '100' },
-            ],
+            verifier: {
+              rules_fired: [
+                { field: 'merchant', ok: true, observed: fixture.merchant },
+                { field: 'receipt_age_days', ok: true, observed: 9 },
+                { field: 'amount', ok: true, observed: fixture.amount },
+                { field: 'zip_prefix', ok: true, observed: '100' },
+              ],
+              ocr_fields: fixture,
+              confidence: 0.95,
+            },
+            fraud_guard: {
+              duplicate: false,
+              device_velocity: 1,
+              risk_score: 0.08,
+              reasons: [],
+            },
             risk: { duplicate: false, device_velocity: 1, score: 0.08 },
             decision: 'APPROVE',
             reason: 'All predicates satisfied, low risk',
@@ -159,9 +201,11 @@ async function main() {
         },
       });
 
-      // Create payout
-      await prisma.payout.create({
-        data: {
+      // Upsert payout
+      await prisma.payout.upsert({
+        where: { submission_id: submission.id },
+        update: {},
+        create: {
           submission_id: submission.id,
           quest_id: quest.id,
           amount: 10.0,
@@ -171,17 +215,24 @@ async function main() {
           mocked: true,
         },
       });
+    }
 
-      // Update quest budget
+    // Update quest budget (only if we created new submissions)
+    const existingPayouts = await prisma.payout.count({
+      where: { quest_id: quest.id },
+    });
+    
+    if (existingPayouts <= 2) {
       await prisma.quest.update({
         where: { id: quest.id },
         data: {
           budget_remaining: {
-            decrement: 10.0,
+            set: 1000.0 - (existingPayouts * 10.0),
           },
         },
       });
     }
+    
     console.log('✅ Created 2 pre-approved demo submissions');
   }
 
@@ -196,4 +247,3 @@ main()
   .finally(async () => {
     await prisma.$disconnect();
   });
-

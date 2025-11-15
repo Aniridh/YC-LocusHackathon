@@ -1,8 +1,7 @@
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../db/client';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 /**
  * GET /healthz

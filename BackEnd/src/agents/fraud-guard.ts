@@ -1,7 +1,7 @@
-import { PrismaClient, Submission } from '@prisma/client';
+import { Submission } from '@prisma/client';
+import prisma from '../db/client';
 import { createHash } from 'crypto';
 
-const prisma = new PrismaClient();
 
 interface FraudResult {
   duplicate: boolean;
@@ -120,8 +120,8 @@ export async function fraudGuardAgent(
   // 1. Duplicate check (canonicalized hash)
   const receiptFingerprint = calculateReceiptFingerprint(
     verifierResult.ocr_fields.merchant,
-    verifierResult.ocr_fields.date,
-    verifierResult.ocr_fields.amount
+    verifierResult.ocr_fields.dateISO,
+    verifierResult.ocr_fields.amountCents / 100
   );
 
   // Check for exact duplicate (same wallet + same receipt)
@@ -144,10 +144,12 @@ export async function fraudGuardAgent(
       const prevOcrFields = trace.verifier?.ocr_fields || trace.ocr_fields;
       
       if (prevOcrFields) {
+        const prevAmount = prevOcrFields.amountCents ? prevOcrFields.amountCents / 100 : prevOcrFields.amount || 0;
+        const prevDate = prevOcrFields.dateISO || prevOcrFields.date;
         const prevFingerprint = calculateReceiptFingerprint(
           prevOcrFields.merchant,
-          prevOcrFields.date,
-          prevOcrFields.amount
+          prevDate,
+          prevAmount
         );
         
         if (prevFingerprint === receiptFingerprint) {
@@ -186,10 +188,12 @@ export async function fraudGuardAgent(
       const globalOcrFields = trace.verifier?.ocr_fields || trace.ocr_fields;
       
       if (globalOcrFields) {
+        const globalAmount = globalOcrFields.amountCents ? globalOcrFields.amountCents / 100 : globalOcrFields.amount || 0;
+        const globalDate = globalOcrFields.dateISO || globalOcrFields.date;
         const globalFingerprint = calculateReceiptFingerprint(
           globalOcrFields.merchant,
-          globalOcrFields.date,
-          globalOcrFields.amount
+          globalDate,
+          globalAmount
         );
         
         if (globalFingerprint === receiptFingerprint) {
@@ -209,7 +213,7 @@ export async function fraudGuardAgent(
   // Fuzzy duplicate check (merchant + date only)
   const fuzzyFingerprint = calculateFuzzyFingerprint(
     verifierResult.ocr_fields.merchant,
-    verifierResult.ocr_fields.date
+    verifierResult.ocr_fields.dateISO
   );
 
   const fuzzyDuplicates = await prisma.submission.findMany({

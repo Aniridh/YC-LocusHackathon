@@ -1,9 +1,9 @@
-import { PrismaClient, Submission, PayoutStatus } from '@prisma/client';
+import { Submission, PayoutStatus } from '@prisma/client';
+import prisma from '../db/client';
 import { getLocusAdapter } from '../locus/adapter';
 import { createHash } from 'crypto';
 import { ethers } from 'ethers';
 
-const prisma = new PrismaClient();
 
 interface SubmissionWithDetails extends Submission {
   quest: {

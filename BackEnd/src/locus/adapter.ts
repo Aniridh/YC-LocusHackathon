@@ -1,6 +1,5 @@
-import { PrismaClient } from '@prisma/client';
+import prisma from '../db/client';
 
-const prisma = new PrismaClient();
 
 export type AuthorizeResult = {
   authorized: boolean;

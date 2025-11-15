@@ -53,6 +53,8 @@ model Buyer {
   created_at   DateTime @default(now())
   
   quests       Quest[]
+  
+  @@index([api_key])
 }
 
 model Quest {
@@ -68,23 +70,23 @@ model Quest {
   
   buyer             Buyer       @relation(fields: [buyer_id], references: [id])
   quest_rules       QuestRule[]
-  submissions       Submission[]
-  payouts           Payout[]
-  daily_counters    DailyCounter[]
+  submissions      Submission[]
+  payouts            Payout[]
+  daily_counters     DailyCounter[]
   
   @@index([buyer_id])
   @@index([status])
+  @@index([created_at])
 }
 
 model QuestRule {
   id        String   @id @default(cuid())
-  quest_id  String
+  quest_id  String   @unique
   rules     Json     // JSONB for eligibility predicates, task, payout, locus_policy
   created_at DateTime @default(now())
   
   quest     Quest    @relation(fields: [quest_id], references: [id], onDelete: Cascade)
   
-  @@unique([quest_id])
   @@index([quest_id])
 }
 
@@ -127,6 +129,7 @@ model Submission {
   @@index([device_fingerprint])
   @@index([status])
   @@index([created_at])
+  @@index([wallet, quest_id])
 }
 
 model VerificationResult {
@@ -140,11 +143,13 @@ model VerificationResult {
   submission     Submission       @relation(fields: [submission_id], references: [id], onDelete: Cascade)
   
   @@index([decision])
+  @@index([created_at])
 }
 
 model Payout {
   id            String        @id @default(cuid())
   submission_id String        @unique
+  quest_id      String
   amount        Decimal       @db.Decimal(10, 2)
   currency      String        @default("USDC")
   tx_hash       String?
@@ -154,12 +159,12 @@ model Payout {
   
   submission    Submission    @relation(fields: [submission_id], references: [id])
   quest         Quest         @relation(fields: [quest_id], references: [id])
-  quest_id      String
   
   @@index([quest_id])
   @@index([tx_hash])
   @@index([status])
   @@index([created_at])
+  @@index([quest_id, created_at])
 }
 
 model AuditEvent {
@@ -174,6 +179,7 @@ model AuditEvent {
   @@index([entity_type, entity_id])
   @@index([actor_id])
   @@index([created_at])
+  @@index([entity_type, entity_id, created_at])
 }
 
 model Job {
@@ -186,8 +192,10 @@ model Job {
   created_at  DateTime   @default(now())
   updated_at  DateTime   @updatedAt
   
-  @@index([status, type])
+  @@index([status, created_at])
+  @@index([status, type, created_at])
   @@index([entity_id])
+  @@index([type, status])
 }
 
 model OcrCache {
@@ -209,5 +217,6 @@ model DailyCounter {
   
   @@id([wallet, quest_id, yyyymmdd])
   @@index([quest_id, yyyymmdd])
+  @@index([wallet, quest_id, yyyymmdd])
 }
 

@@ -1,10 +1,9 @@
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../db/client';
 import { createApiError, ErrorCode, generateRequestId } from '../utils/errors';
 import { payoutAgent } from '../agents/payout';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 // Simple admin auth (check API key)
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'demo_admin_key';

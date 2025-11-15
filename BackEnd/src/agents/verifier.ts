@@ -1,9 +1,7 @@
-import { PrismaClient, Submission } from '@prisma/client';
-import { extractReceiptFields } from '../services/ocr';
+import { Submission } from '@prisma/client';
+import { getOcrFields } from '../services/ocr';
 import { differenceInDays, parseISO } from 'date-fns';
 import * as fs from 'fs';
-
-const prisma = new PrismaClient();
 
 interface RuleTrace {
   field: string;
@@ -51,7 +49,7 @@ export async function verifierAgent(
   } catch (error) {
     // Try alternative path
     try {
-      imageBuffer = fs.readFileSync(`backend/${fullPath}`);
+      imageBuffer = fs.readFileSync(`BackEnd/${fullPath}`);
     } catch {
       throw new Error(`Receipt image not found: ${fullPath}`);
     }
@@ -59,13 +57,13 @@ export async function verifierAgent(
 
   // Extract OCR fields
   const demoMode = process.env.DEMO_MODE === 'true';
-  const ocrResult = await extractReceiptFields(
+  const ocrProvider = (process.env.OCR_PROVIDER as 'vision' | 'textract') || 'vision';
+  
+  const ocrFields = await getOcrFields(
     imageBuffer,
     submission.content_hash,
-    demoMode
+    { demoMode, provider: ocrProvider }
   );
-
-  const ocrFields = ocrResult.fields;
   const rules_fired: RuleTrace[] = [];
 
   // Check each eligibility predicate
@@ -95,7 +93,7 @@ export async function verifierAgent(
 
       case 'receipt_age_days': {
         try {
-          const receiptDate = parseISO(ocrFields.date);
+          const receiptDate = parseISO(ocrFields.dateISO);
           const ageDays = differenceInDays(new Date(), receiptDate);
           ok = op === '<=' ? ageDays <= value : ageDays >= value;
           observed = ageDays;
@@ -105,14 +103,15 @@ export async function verifierAgent(
         } catch (error) {
           ok = false;
           observed = 'invalid_date';
-          reason = `Could not parse receipt date: ${ocrFields.date}`;
+          reason = `Could not parse receipt date: ${ocrFields.dateISO}`;
         }
         break;
       }
 
       case 'amount': {
-        ok = op === '<=' ? ocrFields.amount <= value : ocrFields.amount >= value;
-        observed = ocrFields.amount;
+        const amountDollars = ocrFields.amountCents / 100;
+        ok = op === '<=' ? amountDollars <= value : amountDollars >= value;
+        observed = amountDollars;
         if (!ok) {
           reason = `Amount $${observed} does not satisfy ${op} $${value}`;
         }

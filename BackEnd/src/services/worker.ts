@@ -1,9 +1,9 @@
-import { PrismaClient, JobType, JobStatus } from '@prisma/client';
+import { JobType, JobStatus } from '@prisma/client';
+import prisma from '../db/client';
 import { verifierAgent } from '../agents/verifier';
 import { fraudGuardAgent } from '../agents/fraud-guard';
 import { payoutAgent } from '../agents/payout';
 
-const prisma = new PrismaClient();
 
 const WORKER_INTERVAL_MS = 1000; // 1 second
 let isRunning = false;

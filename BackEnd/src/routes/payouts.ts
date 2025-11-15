@@ -1,9 +1,8 @@
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../db/client';
 import { createApiError, ErrorCode, generateRequestId } from '../utils/errors';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 /**
  * GET /api/audits/:payout_id

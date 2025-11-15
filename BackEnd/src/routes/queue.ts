@@ -1,9 +1,9 @@
 import express from 'express';
-import { PrismaClient, JobStatus } from '@prisma/client';
+import { JobStatus } from '@prisma/client';
+import prisma from '../db/client';
 import { generateRequestId } from '../utils/errors';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 /**
  * GET /api/queue/stats
