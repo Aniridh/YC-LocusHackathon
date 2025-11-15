@@ -1,0 +1,213 @@
+// Prisma schema for Agent-Native Data Quests
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SubmissionStatus {
+  PENDING
+  QUEUED
+  PROCESSING
+  APPROVED
+  REJECTED
+  PAID
+  FAILED
+}
+
+enum QuestStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum JobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum JobType {
+  VERIFY
+  PAYOUT
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model Buyer {
+  id           String   @id @default(cuid())
+  org_name     String
+  contact_email String
+  api_key      String   @unique
+  created_at   DateTime @default(now())
+  
+  quests       Quest[]
+}
+
+model Quest {
+  id                String      @id @default(cuid())
+  buyer_id          String
+  name              String
+  status            QuestStatus  @default(DRAFT)
+  currency          String      @default("USDC")
+  unit_amount       Decimal     @db.Decimal(10, 2)
+  budget_total      Decimal     @db.Decimal(10, 2)
+  budget_remaining  Decimal     @db.Decimal(10, 2)
+  created_at        DateTime    @default(now())
+  
+  buyer             Buyer       @relation(fields: [buyer_id], references: [id])
+  quest_rules       QuestRule[]
+  submissions       Submission[]
+  payouts           Payout[]
+  daily_counters    DailyCounter[]
+  
+  @@index([buyer_id])
+  @@index([status])
+}
+
+model QuestRule {
+  id        String   @id @default(cuid())
+  quest_id  String
+  rules     Json     // JSONB for eligibility predicates, task, payout, locus_policy
+  created_at DateTime @default(now())
+  
+  quest     Quest    @relation(fields: [quest_id], references: [id], onDelete: Cascade)
+  
+  @@unique([quest_id])
+  @@index([quest_id])
+}
+
+model Contributor {
+  id                String   @id @default(cuid())
+  wallet            String   @unique
+  email             String?
+  age               Int?
+  country           String?
+  device_fingerprint String?
+  created_at        DateTime @default(now())
+  
+  submissions      Submission[]
+  
+  @@index([wallet])
+  @@index([device_fingerprint])
+}
+
+model Submission {
+  id                  String           @id @default(cuid())
+  quest_id            String
+  contributor_id      String?
+  wallet              String
+  zip_prefix          String
+  justification_text  String
+  receipt_url         String
+  content_hash        String
+  device_fingerprint  String
+  status              SubmissionStatus @default(PENDING)
+  created_at          DateTime         @default(now())
+  
+  quest               Quest            @relation(fields: [quest_id], references: [id])
+  contributor         Contributor?     @relation(fields: [contributor_id], references: [id])
+  verification_result VerificationResult?
+  payout              Payout?
+  
+  @@index([quest_id])
+  @@index([wallet])
+  @@index([content_hash])
+  @@index([device_fingerprint])
+  @@index([status])
+  @@index([created_at])
+}
+
+model VerificationResult {
+  submission_id  String           @id
+  decision       String           // "APPROVE" or "REJECT"
+  trace          Json             // Rule trace JSON
+  risk_score     Float
+  reasons        String[]
+  created_at     DateTime         @default(now())
+  
+  submission     Submission       @relation(fields: [submission_id], references: [id], onDelete: Cascade)
+  
+  @@index([decision])
+}
+
+model Payout {
+  id            String        @id @default(cuid())
+  submission_id String        @unique
+  amount        Decimal       @db.Decimal(10, 2)
+  currency      String        @default("USDC")
+  tx_hash       String?
+  status        PayoutStatus  @default(PENDING)
+  mocked        Boolean       @default(false)
+  created_at    DateTime      @default(now())
+  
+  submission    Submission    @relation(fields: [submission_id], references: [id])
+  quest         Quest         @relation(fields: [quest_id], references: [id])
+  quest_id      String
+  
+  @@index([quest_id])
+  @@index([tx_hash])
+  @@index([status])
+  @@index([created_at])
+}
+
+model AuditEvent {
+  id          String   @id @default(cuid())
+  entity_type String   // "submission", "payout", "quest"
+  entity_id   String
+  actor_id    String   // Agent ID (verifier, fraud_guard, payout)
+  event_type  String
+  payload     Json
+  created_at  DateTime @default(now())
+  
+  @@index([entity_type, entity_id])
+  @@index([actor_id])
+  @@index([created_at])
+}
+
+model Job {
+  id          String     @id @default(cuid())
+  type        JobType
+  entity_id   String     // submission_id or payout_id
+  status      JobStatus  @default(QUEUED)
+  attempts    Int        @default(0)
+  last_error  String?
+  created_at  DateTime   @default(now())
+  updated_at  DateTime   @updatedAt
+  
+  @@index([status, type])
+  @@index([entity_id])
+}
+
+model OcrCache {
+  image_hash  String   @id
+  ocr_text    String?  @db.Text
+  fields      Json?    // Extracted fields: merchant, date, amount
+  created_at  DateTime @default(now())
+  
+  @@index([created_at])
+}
+
+model DailyCounter {
+  wallet      String
+  quest_id    String
+  yyyymmdd    String   // Format: "20250115"
+  count       Int      @default(0)
+  
+  quest       Quest    @relation(fields: [quest_id], references: [id], onDelete: Cascade)
+  
+  @@id([wallet, quest_id, yyyymmdd])
+  @@index([quest_id, yyyymmdd])
+}
+

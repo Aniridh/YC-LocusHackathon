@@ -1,0 +1,33 @@
+{
+  "demo_hash_1": {
+    "merchant": "Chewy",
+    "date": "2025-01-15",
+    "amount": 28.33
+  },
+  "demo_hash_2": {
+    "merchant": "Petco",
+    "date": "2025-01-20",
+    "amount": 35.50
+  },
+  "demo_hash_3": {
+    "merchant": "Chewy",
+    "date": "2025-01-10",
+    "amount": 42.99
+  },
+  "demo_hash_4": {
+    "merchant": "Petco",
+    "date": "2025-01-18",
+    "amount": 19.99
+  },
+  "demo_hash_5": {
+    "merchant": "Chewy",
+    "date": "2025-01-12",
+    "amount": 31.25
+  },
+  "demo_hash_6": {
+    "merchant": "Petco",
+    "date": "2025-01-22",
+    "amount": 27.80
+  }
+}
+

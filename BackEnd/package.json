@@ -1,0 +1,47 @@
+{
+  "name": "agent-native-data-quests-backend",
+  "version": "1.0.0",
+  "description": "Backend for Agent-Native Data Quests hackathon project",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "migrate": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "generate": "prisma generate",
+    "seed": "tsx scripts/seed.ts",
+    "reset-demo": "tsx scripts/reset-demo.ts",
+    "preprocess-receipts": "tsx scripts/preprocess-receipts.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@fingerprintjs/fingerprintjs": "^4.2.1",
+    "@google-cloud/vision": "^4.0.0",
+    "@prisma/client": "^5.19.0",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "date-fns": "^3.6.0",
+    "ethers": "^6.13.0",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^3.0.3",
+    "pino": "^9.4.0",
+    "pino-http": "^10.0.0",
+    "sharp": "^0.33.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.11",
+    "@types/node": "^20.14.9",
+    "@types/node-cron": "^3.0.11",
+    "prisma": "^5.19.0",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3"
+  }
+}
+
